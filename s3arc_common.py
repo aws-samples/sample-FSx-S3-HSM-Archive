@@ -16,7 +16,7 @@ from botocore.exceptions import BotoCoreError, ClientError
 STUB_EXT = ".s3arc"
 CHECKSUM_ALGORITHM = "SHA256"
 
-VERSION = "0.9"
+VERSION = "1.0"
 
 # FSx tag names
 FSX_TAG_ARCHIVE_BUCKET = "ArchiveBucket"
