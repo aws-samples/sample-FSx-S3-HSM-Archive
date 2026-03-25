@@ -216,6 +216,15 @@ def stub_file(filepath, base, bucket, prefix, storage_class, s3_client, dry_run=
     except OSError as e:
         print(f"Warning: cannot preserve metadata on stub {stub_path}: {e}", file=sys.stderr)
 
+    # Verify file was not modified during upload
+    try:
+        post_stat = os.stat(filepath)
+        if post_stat.st_mtime != file_stat.st_mtime or post_stat.st_size != file_stat.st_size:
+            os.remove(stub_path)
+            return filepath, 0, False, "error", "file modified during upload — aborting (S3 copy removed on next run)"
+    except OSError:
+        pass
+
     try:
         os.remove(filepath)
     except OSError as e:
