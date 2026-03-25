@@ -27,3 +27,6 @@ Project-Context.md
 
 # Test artifacts
 .pytest_cache/
+
+# Build
+/build
