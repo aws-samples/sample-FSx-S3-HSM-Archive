@@ -4,6 +4,8 @@
 """s3recall: Restore .s3arc stub files from S3 Glacier Instant Retrieval."""
 
 import argparse
+import base64
+import hashlib
 import json
 import os
 import subprocess
@@ -12,6 +14,7 @@ import tempfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import boto3
 from botocore.exceptions import BotoCoreError, ClientError
+from boto3.s3.transfer import TransferConfig
 
 from s3arc_common import (
     STUB_EXT, FSX_TAG_SNS_TOPIC, FSX_TAG_RESTORE_DAYS, FSX_TAG_RESTORE_TIER,
@@ -22,6 +25,14 @@ from s3arc_common import (
 
 DEFAULT_WORKERS = 8
 DEFAULT_BUCKET = os.environ.get("S3ARC_BUCKET")
+
+# Limit per-transfer concurrency so parallel workers don't compound into
+# hundreds of connections (default is 10 threads × N workers).
+S3_TRANSFER_CONFIG = TransferConfig(
+    max_concurrency=5,
+    multipart_threshold=64 * 1024 * 1024,   # 64 MB
+    multipart_chunksize=64 * 1024 * 1024,    # 64 MB
+)
 
 
 def get_config_from_fsx(target_path):
@@ -70,7 +81,7 @@ def get_config_from_fsx(target_path):
 
 
 
-def recall_file(filepath, config, s3_client, dry_run=False, progress=None, cached_head=None):
+def recall_file(filepath, config, s3_client, dry_run=False, progress=None, cached_head=None, delete_archive=False, endtoendcheck=False):
     """Restore a single .s3arc stub file from S3."""
 
     if not filepath.endswith(STUB_EXT):
@@ -132,7 +143,8 @@ def recall_file(filepath, config, s3_client, dry_run=False, progress=None, cache
                 return filepath, 0, False, "error", f"cannot initiate restore: {e}"
 
     if dry_run:
-        return filepath, file_size, True, "would recall", f"-> {original_path}"
+        delete_label = " (and delete S3 archive)" if delete_archive else ""
+        return filepath, file_size, True, "would recall", f"-> {original_path}{delete_label}"
 
     # Ownership check: non-root can only restore their own files
     s3_metadata = head.get("Metadata", {})
@@ -147,7 +159,8 @@ def recall_file(filepath, config, s3_client, dry_run=False, progress=None, cache
 
     # Download file
     try:
-        s3_client.download_file(bucket, key, original_path, Callback=callback)
+        s3_client.download_file(bucket, key, original_path, Callback=callback,
+                               Config=S3_TRANSFER_CONFIG)
     except (BotoCoreError, ClientError) as e:
         try:
             if os.path.exists(original_path):
@@ -172,6 +185,20 @@ def recall_file(filepath, config, s3_client, dry_run=False, progress=None, cache
             print(f"Warning: cannot remove corrupted file {original_path}: {e}", file=sys.stderr)
         return filepath, 0, False, "error", f"size mismatch (expected={file_size}, actual={actual_size})"
 
+    # End-to-end checksum verification: confirm file on disk matches stub SHA-256
+    if endtoendcheck and expected_checksum:
+        sha = hashlib.sha256()
+        with open(original_path, "rb") as f:
+            for chunk in iter(lambda: f.read(8 * 1024 * 1024), b""):
+                sha.update(chunk)
+        local_checksum = base64.b64encode(sha.digest()).decode()
+        if local_checksum != expected_checksum:
+            try:
+                os.remove(original_path)
+            except OSError as e:
+                print(f"Warning: cannot remove corrupted file {original_path}: {e}", file=sys.stderr)
+            return filepath, 0, False, "error", f"checksum mismatch (expected={expected_checksum}, actual={local_checksum})"
+
     # Restore metadata
     try:
         mtime = s3_metadata.get("original-mtime")
@@ -181,12 +208,22 @@ def recall_file(filepath, config, s3_client, dry_run=False, progress=None, cache
         mode = s3_metadata.get("original-mode")
         if mode:
             os.chmod(original_path, int(mode, 8))
-        uid = s3_metadata.get("original-uid")
-        gid = s3_metadata.get("original-gid")
-        if uid and gid:
-            os.chown(original_path, int(uid), int(gid))
     except (ValueError, OSError) as e:
         print(f"Warning: cannot restore metadata on {original_path}: {e}", file=sys.stderr)
+
+    # Restore ownership (requires root)
+    uid = s3_metadata.get("original-uid")
+    gid = s3_metadata.get("original-gid")
+    if uid and gid:
+        try:
+            os.chown(original_path, int(uid), int(gid))
+        except PermissionError:
+            if os.getuid() != 0:
+                pass  # Expected: non-root cannot chown
+            else:
+                print(f"Warning: cannot restore ownership on {original_path}", file=sys.stderr)
+        except (ValueError, OSError) as e:
+            print(f"Warning: cannot restore ownership on {original_path}: {e}", file=sys.stderr)
 
     # Remove stub
     try:
@@ -194,15 +231,23 @@ def recall_file(filepath, config, s3_client, dry_run=False, progress=None, cache
     except OSError as e:
         print(f"Warning: cannot remove stub {filepath}: {e}", file=sys.stderr)
 
+    # Delete S3 archive copy if requested
+    if delete_archive:
+        try:
+            s3_client.delete_object(Bucket=bucket, Key=key)
+        except (BotoCoreError, ClientError) as e:
+            print(f"Warning: recalled file OK but cannot delete S3 archive s3://{bucket}/{key}: {e}", file=sys.stderr)
+
     if progress:
         progress.file_complete(file_size)
 
     # Include storage class in status message
     tier_label = "offline" if stored_class == "DEEP_ARCHIVE" else "online"
-    return filepath, file_size, True, "recalled", f"{original_path} ({tier_label})"
+    deleted_label = ", S3 archive deleted" if delete_archive else ""
+    return filepath, file_size, True, "recalled", f"{original_path} ({tier_label}{deleted_label})"
 
 
-def recall_aggregate(filepath, config, dry_run=False):
+def recall_aggregate(filepath, config, dry_run=False, delete_archive=False):
     """Restore an aggregate .s3arc stub (directory archive)."""
     if not filepath.endswith(STUB_EXT):
         print(f"Error: {filepath} is not a stub file")
@@ -286,6 +331,8 @@ def recall_aggregate(filepath, config, dry_run=False):
         print(f"  Target directory: {target_dir}")
         if manifest and 'file_list' in manifest:
             print(f"  Files in archive: {', '.join(manifest['file_list'])}")
+        if delete_archive:
+            print(f"  Would delete S3 archive: s3://{bucket}/{key}")
         return True
     
     # Check if any files would be overwritten
@@ -311,7 +358,20 @@ def recall_aggregate(filepath, config, dry_run=False):
             temp_archive = f.name
         
         print(f"Downloading: {key} ({fmt_size(file_size)})")
-        s3_client.download_file(bucket, key, temp_archive)
+
+        # Progress callback for aggregate download
+        _dl_bytes = [0]
+        def _dl_progress(chunk):
+            _dl_bytes[0] += chunk
+            pct = (_dl_bytes[0] / file_size * 100) if file_size else 0
+            sys.stdout.write(f"\r  Downloading: {fmt_size(_dl_bytes[0])} / {fmt_size(file_size)} ({pct:.0f}%)")
+            sys.stdout.flush()
+
+        s3_client.download_file(bucket, key, temp_archive,
+                               Callback=_dl_progress if sys.stdout.isatty() else None,
+                               Config=S3_TRANSFER_CONFIG)
+        if sys.stdout.isatty():
+            sys.stdout.write("\n")
         
         # Verify download size
         actual_size = os.path.getsize(temp_archive)
@@ -327,6 +387,20 @@ def recall_aggregate(filepath, config, dry_run=False):
     
     # Extract archive to target directory
     try:
+        # Validate archive paths before extraction (path traversal protection)
+        listing = subprocess.run(['tar', 'tzf', temp_archive],
+                                 capture_output=True, text=True, check=True)
+        abs_target = os.path.realpath(target_dir)
+        for entry in listing.stdout.strip().split('\n'):
+            if not entry:
+                continue
+            resolved = os.path.realpath(os.path.join(target_dir, entry))
+            if not resolved.startswith(abs_target + os.sep) and resolved != abs_target:
+                print(f"Error: archive contains unsafe path: {entry}")
+                if temp_archive:
+                    os.remove(temp_archive)
+                return False
+
         print(f"Extracting files to: {target_dir}")
         cmd = ['tar', 'xzf', temp_archive, '-C', target_dir]
         result = subprocess.run(cmd, capture_output=True, text=True, check=True)
@@ -377,6 +451,14 @@ def recall_aggregate(filepath, config, dry_run=False):
     except OSError as e:
         print(f"Warning: could not remove manifest: {e}")
     
+    # Delete S3 archive copy if requested
+    if delete_archive:
+        try:
+            s3_client.delete_object(Bucket=bucket, Key=key)
+            print(f"Deleted S3 archive: s3://{bucket}/{key}")
+        except (BotoCoreError, ClientError) as e:
+            print(f"Warning: recalled files OK but cannot delete S3 archive s3://{bucket}/{key}: {e}")
+    
     # Send notification
     if config["sns_topic"]:
         subject = "S3Arc: Aggregate recall completed"
@@ -410,9 +492,14 @@ def main():
     parser.add_argument("--version", action="version", version=f"s3recall {VERSION}")
     parser.add_argument("target", help="Stub file or directory to recall")
     parser.add_argument("--dry-run", action="store_true", help="Show what would be recalled without doing it")
+    parser.add_argument("--delete-archive", action="store_true",
+                        help="Delete S3 archive copy after successful recall (prompts for confirmation)")
+    parser.add_argument("--yes", action="store_true", help="Skip confirmation prompt for --delete-archive")
     parser.add_argument("--no-progress", action="store_true", help="Disable progress indicator")
     parser.add_argument("--workers", type=int, default=DEFAULT_WORKERS,
                         help=f"Parallel download workers (default: {DEFAULT_WORKERS})")
+    parser.add_argument("--endtoendcheck", action="store_true",
+                        help="Verify SHA-256 checksum of recalled file against stub metadata (disk integrity check)")
     args = parser.parse_args()
 
     if not os.path.exists(args.target):
@@ -425,11 +512,19 @@ def main():
     # Verify credentials
     get_s3_client()
 
+    # Confirm --delete-archive if not using --yes
+    delete_archive = args.delete_archive
+    if delete_archive and not args.dry_run and not args.yes:
+        response = input("Delete S3 archive copies after successful recall? This cannot be undone. [y/N]: ").strip().lower()
+        if response != 'y':
+            print("Aborted.")
+            sys.exit(0)
+
     # Check if target is a single aggregate stub
     if args.target.endswith(STUB_EXT) and os.path.isfile(args.target):
         meta = read_stub(args.target)
         if meta.get("type") == "aggregate":
-            success = recall_aggregate(args.target, config, args.dry_run)
+            success = recall_aggregate(args.target, config, args.dry_run, delete_archive)
             sys.exit(0 if success else 1)
 
     stubs = collect_stubs(args.target)
@@ -454,7 +549,7 @@ def main():
     
     for stub in aggregate_stubs:
         print(f"\nProcessing aggregate stub: {stub}")
-        success = recall_aggregate(stub, config, args.dry_run)
+        success = recall_aggregate(stub, config, args.dry_run, delete_archive)
         if success:
             aggregate_success += 1
         else:
@@ -503,7 +598,7 @@ def main():
     num_workers = min(args.workers, len(stubs))
     with ThreadPoolExecutor(max_workers=num_workers) as executor:
         futures = {
-            executor.submit(recall_file, stub, config, s3_client, args.dry_run, progress, head_cache.get(stub)): stub
+            executor.submit(recall_file, stub, config, s3_client, args.dry_run, progress, head_cache.get(stub), delete_archive, args.endtoendcheck): stub
             for stub in stubs
         }
         for future in as_completed(futures):

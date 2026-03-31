@@ -83,7 +83,7 @@ class TestStubReadWrite:
 class TestConstants:
     def test_version_format(self):
         from s3arc_common import VERSION
-        assert VERSION == "1.0"
+        assert VERSION == "1.1"
 
     def test_stub_ext(self):
         from s3arc_common import STUB_EXT

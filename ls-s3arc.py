@@ -7,10 +7,9 @@ import argparse
 import os
 import sys
 import json
-import boto3
 from botocore.exceptions import BotoCoreError, ClientError
 
-from s3arc_common import STUB_EXT, VERSION, fmt_size, read_stub
+from s3arc_common import STUB_EXT, VERSION, fmt_size, read_stub, get_s3_client
 
 DEFAULT_BUCKET = os.environ.get("S3ARC_BUCKET")
 
@@ -142,9 +141,9 @@ def main():
     s3_client = None
     if check_status:
         try:
-            s3_client = boto3.client("s3")
-        except (BotoCoreError, ClientError) as e:
-            print(f"WARNING: cannot init S3 client: {e}. Skipping status checks.", file=sys.stderr)
+            s3_client = get_s3_client()
+        except SystemExit:
+            print("WARNING: cannot init S3 client. Skipping status checks.", file=sys.stderr)
 
     stubs = []
     for target in targets:

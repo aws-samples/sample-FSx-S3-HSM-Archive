@@ -1008,6 +1008,8 @@ s3arc and built-in tiering solve different problems. s3arc is designed for inten
 - `--list-contents` flag to display aggregate archive manifest without recalling
 - Selective file extraction from aggregate archives (tar index-based)
 - Support for S3 Glacier Flexible Retrieval as an intermediate tier option
+- `--endtoendcheck` flag on s3recall: post-download SHA-256 verification against checksum stored in stub file
+- `s3import.py`: stub-free import from S3 by prefix, with optional `--dest` for custom restore path (no-clobber default, `--force` to overwrite; path validation required when running as root)
 
 ---
 

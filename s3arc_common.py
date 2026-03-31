@@ -11,12 +11,13 @@ import sys
 import threading
 
 import boto3
+from botocore.config import Config as BotoConfig
 from botocore.exceptions import BotoCoreError, ClientError
 
 STUB_EXT = ".s3arc"
 CHECKSUM_ALGORITHM = "SHA256"
 
-VERSION = "1.0"
+VERSION = "1.1"
 
 # FSx tag names
 FSX_TAG_ARCHIVE_BUCKET = "ArchiveBucket"
@@ -49,9 +50,11 @@ def fmt_size(nbytes):
 
 
 def get_s3_client():
-    """Create and return an S3 client, exit on failure."""
+    """Create and return an S3 client with standard retry mode, exit on failure."""
     try:
-        return boto3.client("s3")
+        return boto3.client("s3", config=BotoConfig(
+            retries={"mode": "standard", "max_attempts": 5}
+        ))
     except (BotoCoreError, ClientError) as e:
         print(f"ERROR: Failed to initialize S3 client: {e}", file=sys.stderr)
         sys.exit(1)

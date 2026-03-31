@@ -9,6 +9,9 @@ from unittest import mock
 mock_boto3 = mock.MagicMock()
 mock_botocore = mock.MagicMock()
 mock_botocore_exceptions = mock.MagicMock()
+mock_botocore_config = mock.MagicMock()
+mock_boto3_s3 = mock.MagicMock()
+mock_boto3_s3_transfer = mock.MagicMock()
 
 # Make BotoCoreError and ClientError behave as exception classes
 mock_botocore_exceptions.BotoCoreError = type("BotoCoreError", (Exception,), {})
@@ -17,5 +20,8 @@ mock_botocore_exceptions.ClientError = type("ClientError", (Exception,), {
 })
 
 sys.modules.setdefault("boto3", mock_boto3)
+sys.modules.setdefault("boto3.s3", mock_boto3_s3)
+sys.modules.setdefault("boto3.s3.transfer", mock_boto3_s3_transfer)
 sys.modules.setdefault("botocore", mock_botocore)
+sys.modules.setdefault("botocore.config", mock_botocore_config)
 sys.modules.setdefault("botocore.exceptions", mock_botocore_exceptions)

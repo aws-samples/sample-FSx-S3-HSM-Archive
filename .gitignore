@@ -25,6 +25,9 @@ Thumbs.db
 Project-Context.md
 *.docx
 
+# Brazil build system (internal)
+Config
+
 # Test artifacts
 .pytest_cache/
 

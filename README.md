@@ -163,6 +163,12 @@ With `-offline`, recall is asynchronous. `s3recall` initiates the restore and, i
 # Recall all stubs in a directory
 ./s3recall.py /mnt/fsx/project/
 
+# Recall and delete the S3 archive copy (prompts for confirmation)
+./s3recall.py --delete-archive /mnt/fsx/project/data.csv.s3arc
+
+# Recall and delete without confirmation prompt (for scripted use)
+./s3recall.py --delete-archive --yes /mnt/fsx/project/
+
 # Dry run — show what would be recalled
 ./s3recall.py --dry-run /mnt/fsx/project/
 
@@ -174,7 +180,16 @@ With `-offline`, recall is asynchronous. `s3recall` initiates the restore and, i
 
 # Use fewer workers for large files or limited bandwidth
 ./s3recall.py --workers 4 /mnt/fsx/datasets/
+
+# Verify SHA-256 checksum after download (disk integrity check)
+./s3recall.py --endtoendcheck /mnt/fsx/project/data.csv.s3arc
 ```
+
+**Deleting S3 archive copies (`--delete-archive`):**
+
+By default, `s3recall` downloads the file from S3 and restores it locally, but the S3 archive copy is preserved. Use `--delete-archive` to delete the S3 object after a successful recall. This is useful when you no longer need the archive copy and want to stop incurring S3 storage charges.
+
+The tool prompts for confirmation before deleting. Use `--yes` to skip the prompt for scripted or batch operations. The S3 object is only deleted after the local file has been fully restored and verified — if the recall fails, the S3 copy is not deleted.
 
 **Recalling from Deep Archive (`-offline`):**
 
@@ -360,7 +375,7 @@ S3Arc requires the following minimum IAM permissions:
 |-------------------------------------|----------------------|----------------------------------------|
 | `s3:PutObject`                      | s3archive            | Upload files to S3                     |
 | `s3:GetObject`                      | s3recall, ls-s3arc   | Download files, read metadata          |
-| `s3:DeleteObject`                   | s3archive            | Remove replaced objects                |
+| `s3:DeleteObject`                   | s3archive, s3recall  | Remove replaced objects; delete archive on recall |
 | `s3:ListBucket`                     | ls-s3arc             | List archived objects                  |
 | `s3:GetObjectAttributes`            | s3recall, ls-s3arc   | Check storage class and size           |
 | `s3:RestoreObject`                  | s3recall             | Initiate Deep Archive restore          |
@@ -427,6 +442,28 @@ S3Arc is compatible with S3 lifecycle policies, but automatic storage class tran
 
 The transition itself is free — S3 only charges for retrieval when you recall.
 
+## S3 Bucket Versioning
+
+S3Arc is compatible with S3 bucket versioning. If versioning is enabled on the archive bucket, each time a file is archived to the same S3 key, S3 automatically retains the previous version. This provides point-in-time recovery of archived data without any changes to S3Arc.
+
+**When this is useful:**
+- A file is archived, recalled, modified, and archived again — both versions are retained in S3
+- Accidental overwrites are recoverable via S3 version history
+
+**Configuration:**
+Versioning is a bucket-level setting, not an S3Arc feature. Enable it on your archive bucket:
+
+```bash
+aws s3api put-bucket-versioning \
+    --bucket my-archive-bucket \
+    --versioning-configuration Status=Enabled
+```
+
+**Considerations:**
+- Previous versions continue to incur storage charges until explicitly deleted or expired by a lifecycle rule
+- Use S3 lifecycle rules to expire old versions after a retention period if cost is a concern
+- `--delete-archive` on `s3recall` deletes the current version only; previous versions are retained if versioning is enabled
+
 ## Limitations
 
 ### Per-File Mode
@@ -442,6 +479,33 @@ The transition itself is free — S3 only charges for retrieval when you recall.
 - Creates hierarchical stub structure that mirrors original directory tree
 
 ## Future Planned Features
+
+### Segmented Aggregate Archives (Multi-Part Tar)
+
+Split large aggregate archives into fixed-size parts for directories that exceed S3's 5TB single-object limit or where parallel upload/download of segments is desirable.
+
+**CLI flag:** `--segment-size SIZE` (100MB to 1TB, human-readable: `500MB`, `1GB`, `100GB`)
+
+```bash
+# Archive a large directory in 1GB segments
+./s3archive.py --aggregate --segment-size 1GB /mnt/fsx/project/huge-dataset/
+
+# Default (no flag) remains a single .tar.gz as today
+./s3archive.py --aggregate /mnt/fsx/project/small-dataset/
+```
+
+**How it works:**
+- The `.tar.gz` is split into fixed-size parts: `dir_files.tar.gz.part01`, `dir_files.tar.gz.part02`, ..., `dir_files.tar.gz.partNN`
+- Each part is uploaded as a separate S3 object with its own SHA-256 checksum
+- The aggregate stub records all part keys and their order
+- On recall, parts are downloaded in parallel and concatenated before extraction
+- Resumable at part granularity — a failed transfer retries only the affected part
+
+**Benefits:**
+- Stays under S3's 5TB single-object limit for very large directories
+- Parallel upload/download of parts improves throughput
+- Resumable transfers at part granularity
+- Compatible with both `-online` and `-offline` tiers
 
 ### Vaulting (S3 Object Lock / WORM Protection)
 

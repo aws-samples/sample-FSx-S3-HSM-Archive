@@ -14,6 +14,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import boto3
 from botocore.exceptions import BotoCoreError, ClientError
+from boto3.s3.transfer import TransferConfig
 
 from s3arc_common import (
     STUB_EXT, CHECKSUM_ALGORITHM, STORAGE_COSTS, DEFAULT_STORAGE_CLASS,
@@ -24,6 +25,14 @@ from s3arc_common import (
 
 # Configuration
 DEFAULT_WORKERS = 8
+
+# Limit per-transfer concurrency so parallel workers don't compound into
+# hundreds of connections (default is 10 threads × N workers).
+S3_TRANSFER_CONFIG = TransferConfig(
+    max_concurrency=5,
+    multipart_threshold=64 * 1024 * 1024,   # 64 MB
+    multipart_chunksize=64 * 1024 * 1024,    # 64 MB
+)
 
 
 
@@ -171,7 +180,8 @@ def stub_file(filepath, base, bucket, prefix, storage_class, s3_client, dry_run=
                     "original-gid": str(file_stat.st_gid),
                 }
             },
-            Callback=callback
+            Callback=callback,
+            Config=S3_TRANSFER_CONFIG
         )
     except ClientError as e:
         code = e.response["Error"]["Code"]
@@ -418,6 +428,14 @@ def archive_files_in_directory(dir_path, files, config, dry_run=False):
     
     print(f"Uploading: {s3_key} ({fmt_size(compressed_size)})")
     
+    # Progress callback for aggregate upload
+    _agg_uploaded = [0]
+    def _agg_progress(chunk):
+        _agg_uploaded[0] += chunk
+        pct = (_agg_uploaded[0] / compressed_size * 100) if compressed_size else 0
+        sys.stdout.write(f"\r  Uploading: {fmt_size(_agg_uploaded[0])} / {fmt_size(compressed_size)} ({pct:.0f}%)")
+        sys.stdout.flush()
+
     try:
         s3_client.upload_file(
             temp_archive_path, config["bucket"], s3_key,
@@ -432,7 +450,9 @@ def archive_files_in_directory(dir_path, files, config, dry_run=False):
                     "original-uid": str(os.getuid()),
                     "original-gid": str(os.getgid()),
                 }
-            }
+            },
+            Callback=_agg_progress if sys.stdout.isatty() else None,
+            Config=S3_TRANSFER_CONFIG
         )
     except ClientError as e:
         code = e.response["Error"]["Code"]
@@ -465,6 +485,8 @@ def archive_files_in_directory(dir_path, files, config, dry_run=False):
         print(f"Error: upload verification failed for {dir_path}: {e}")
         return False
     
+    if sys.stdout.isatty():
+        sys.stdout.write("\n")
     print(f"Uploaded: verified ({fmt_size(remote_size)})")
     
     # Generate local manifest file from tar archive
@@ -591,12 +613,12 @@ def main():
     print(f"  Prefix: {config['prefix']}")
     print(f"  Storage class: {config['storage_class']}")
 
-    # Verify credentials
-    get_s3_client()
+    # Create single S3 client for all operations
+    s3_client = get_s3_client()
 
     # Verify bucket exists
     try:
-        boto3.client("s3").head_bucket(Bucket=config["bucket"])
+        s3_client.head_bucket(Bucket=config["bucket"])
     except (BotoCoreError, ClientError) as e:
         print(f"ERROR: cannot access bucket '{config['bucket']}': {e}", file=sys.stderr)
         sys.exit(1)
@@ -638,7 +660,6 @@ def main():
     archived_bytes = 0
 
     # Use thread pool for parallel uploads
-    s3_client = get_s3_client()
     num_workers = min(args.workers, len(files))
     with ThreadPoolExecutor(max_workers=num_workers) as executor:
         futures = {
