@@ -255,12 +255,46 @@ Resources:
       ServiceToken: !GetAtt EmptyBucketLambda.Arn
       Bucket: !Ref ArchiveBucket
 
+  # KMS key for SNS topic encryption at rest
+  SnsEncryptionKey:
+    Type: AWS::KMS::Key
+    Properties:
+      Description: Encrypts SNS restore notification messages at rest
+      EnableKeyRotation: true
+      KeyPolicy:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: AllowAccountAdmin
+            Effect: Allow
+            Principal:
+              AWS: !Sub arn:aws:iam::${AWS::AccountId}:root
+            Action: kms:*
+            Resource: '*'
+          - Sid: AllowS3ToPublish
+            Effect: Allow
+            Principal:
+              Service: s3.amazonaws.com
+            Action:
+              - kms:GenerateDataKey
+              - kms:Decrypt
+            Resource: '*'
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+
+  SnsEncryptionKeyAlias:
+    Type: AWS::KMS::Alias
+    Properties:
+      AliasName: !Sub alias/${AWS::StackName}-sns-key
+      TargetKeyId: !Ref SnsEncryptionKey
+
   # SNS Topic for restore notifications
   RestoreNotificationTopic:
     Type: AWS::SNS::Topic
     Properties:
       TopicName: !Sub ${AWS::StackName}-restore-notifications
       DisplayName: S3Arc Glacier Restore Notifications
+      KmsMasterKeyId: !Ref SnsEncryptionKey
 
   # SNS Topic Policy to allow S3 to publish
   RestoreNotificationTopicPolicy:
