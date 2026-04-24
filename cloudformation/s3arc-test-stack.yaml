@@ -193,6 +193,9 @@ Resources:
             Principal:
               Service: lambda.amazonaws.com
             Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
       Policies:
         - PolicyName: EmptyBucket
           PolicyDocument:
@@ -202,17 +205,18 @@ Resources:
                 Action:
                   - s3:ListBucket
                   - s3:ListBucketVersions
+                Resource: !GetAtt ArchiveBucket.Arn
+              - Effect: Allow
+                Action:
                   - s3:DeleteObject
                   - s3:DeleteObjectVersion
-                Resource:
-                  - !GetAtt ArchiveBucket.Arn
-                  - !Sub ${ArchiveBucket.Arn}/*
+                Resource: !Sub ${ArchiveBucket.Arn}/*
               - Effect: Allow
                 Action:
                   - logs:CreateLogGroup
                   - logs:CreateLogStream
                   - logs:PutLogEvents
-                Resource: !Sub arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/*
+                Resource: !Sub arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/${AWS::StackName}-*
 
   EmptyBucketLambda:
     Type: AWS::Lambda::Function
@@ -350,6 +354,9 @@ Resources:
             Principal:
               Service: ec2.amazonaws.com
             Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
       Policies:
         - PolicyName: S3ArcAccess
           PolicyDocument:
