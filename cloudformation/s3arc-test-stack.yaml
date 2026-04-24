@@ -269,16 +269,12 @@ Resources:
             Principal:
               AWS: !Sub arn:aws:iam::${AWS::AccountId}:root
             Action:
-              - kms:Create*
-              - kms:Describe*
-              - kms:Enable*
-              - kms:List*
-              - kms:Put*
-              - kms:Update*
-              - kms:Revoke*
-              - kms:Disable*
-              - kms:Get*
-              - kms:Delete*
+              - kms:DescribeKey
+              - kms:EnableKeyRotation
+              - kms:DisableKeyRotation
+              - kms:GetKeyPolicy
+              - kms:GetKeyRotationStatus
+              - kms:ListResourceTags
               - kms:TagResource
               - kms:UntagResource
               - kms:ScheduleKeyDeletion
@@ -291,8 +287,10 @@ Resources:
             Action:
               - kms:Encrypt
               - kms:Decrypt
-              - kms:ReEncrypt*
-              - kms:GenerateDataKey*
+              - kms:ReEncryptFrom
+              - kms:ReEncryptTo
+              - kms:GenerateDataKey
+              - kms:GenerateDataKeyWithoutPlaintext
               - kms:DescribeKey
             Resource: '*'
           - Sid: AllowS3ToPublish
